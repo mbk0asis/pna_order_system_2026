@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+.venv
+env/
+venv/
+.DS_Store
+pna_results.csv
+*.csv
+.streamlit/

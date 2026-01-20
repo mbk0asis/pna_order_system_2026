@@ -44,51 +44,60 @@ with st.sidebar.expander("Thermodynamics", expanded=True):
 # --- Main Input ---
 input_method = st.radio("Input Method", ["Gene Symbol (NCBI)", "Raw Sequence", "FASTA File"])
 
-target_sequence = ""
-gene_name = "Unknown"
+targets = [] # List of tuples (gene_name, sequence)
 
 if input_method == "Gene Symbol (NCBI)":
-    gene_symbol = st.text_input("Enter Gene Symbol (e.g., GAPDH, ACTB)", value="")
-    if gene_symbol:
-        if st.button("Fetch Sequence"):
-            with st.spinner(f"Fetching {gene_symbol} from NCBI..."):
-                try:
-                    target_sequence, acc_id, desc = ncbi.fetch_mrna_by_symbol(gene_symbol)
-                    gene_name = gene_symbol
-                    st.success(f"Downloaded {acc_id}: {desc}")
-                    st.session_state['target_sequence'] = target_sequence
-                    st.session_state['gene_name'] = gene_name
-                except Exception as e:
-                    st.error(f"Error: {e}")
-    
+    gene_input = st.text_input("Enter Gene Symbol(s) (comma separated)", value="")
+    if gene_input:
+        if st.button("Fetch Sequences"):
+            gene_list = [g.strip() for g in gene_input.split(',') if g.strip()]
+            
+            with st.spinner(f"Fetching {len(gene_list)} genes from NCBI..."):
+                fetched_targets = []
+                for sym in gene_list:
+                    try:
+                        seq, acc_id, desc = ncbi.fetch_mrna_by_symbol(sym)
+                        fetched_targets.append((sym, seq))
+                        st.success(f"Downloaded {sym} ({acc_id})")
+                    except Exception as e:
+                        st.error(f"Error fetching {sym}: {e}")
+                
+                if fetched_targets:
+                    st.session_state['targets'] = fetched_targets
+
     # Persist
-    if 'target_sequence' in st.session_state and input_method == "Gene Symbol (NCBI)":
-        target_sequence = st.session_state['target_sequence']
-        gene_name = st.session_state['gene_name']
+    if 'targets' in st.session_state and input_method == "Gene Symbol (NCBI)":
+        targets = st.session_state['targets']
+        st.info(f"Loaded {len(targets)} targets: {', '.join([t[0] for t in targets])}")
 
 elif input_method == "Raw Sequence":
     target_sequence = st.text_area("Paste DNA/mRNA Sequence (5'->3')", height=150)
     gene_name = st.text_input("Gene Name/Identifier", value="CustomSeq")
+    if target_sequence:
+        targets = [(gene_name, target_sequence)]
 
 elif input_method == "FASTA File":
-    uploaded_file = st.file_uploader("Upload FASTA", type=["fasta", "fa"])
+    uploaded_file = st.file_uploader("Upload FASTA (Single or Multi-record)", type=["fasta", "fa"])
     if uploaded_file is not None:
         stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
-        record = next(SeqIO.parse(stringio, "fasta"))
-        target_sequence = str(record.seq)
-        gene_name = record.id
-        st.info(f"Loaded {gene_name} ({len(target_sequence)} bp)")
+        # Parse all records
+        for record in SeqIO.parse(stringio, "fasta"):
+            targets.append((record.id, str(record.seq)))
+        st.info(f"Loaded {len(targets)} sequences from file.")
 
-# --- Analysis Button ---
-if target_sequence:
-    st.write(f"**Target Length:** {len(target_sequence)} bp")
-    
+# --- Analysis ---
+if targets:
     if st.button("Run PNA Design", type="primary"):
-        with st.spinner("Tiling and Analyzing..."):
-            # Initialize Designer
-            pna_ds = designer.PNADesigner(target_sequence, gene_name)
+        all_probes_list = []
+        
+        progress_bar = st.progress(0)
+        
+        for idx, (g_name, t_seq) in enumerate(targets):
+            # Update Progress
+            progress_bar.progress((idx + 1) / len(targets))
             
             # Run Design
+            pna_ds = designer.PNADesigner(t_seq, g_name)
             probes = pna_ds.design_probes(
                 lengths=range(min_len, max_len + 1), 
                 tm_min=target_tm_min, 
@@ -96,65 +105,49 @@ if target_sequence:
             )
             
             if not probes.empty:
-                # --- Apply Dynamic User Filters ---
-                # We filter the DataFrame based on Sidebar inputs
+                probes['Gene'] = g_name
+                all_probes_list.append(probes)
+        
+        progress_bar.empty()
+        
+        if all_probes_list:
+            full_df = pd.concat(all_probes_list, ignore_index=True)
+            
+            # --- Apply Dynamic User Filters ---
+            mask_gc = (full_df['gc_content'] >= gc_min) & (full_df['gc_content'] <= gc_max)
+            mask_purine = (full_df['purine_content'] <= purine_max)
+            mask_tm = (full_df['tm_pna_giesen'] >= target_tm_min) & (full_df['tm_pna_giesen'] <= target_tm_max)
+            mask_valid = full_df['valid'] # Only basic structure validity
+            
+            filtered_df = full_df[mask_gc & mask_purine & mask_tm & mask_valid].copy()
+            
+            # Metrics
+            st.divider()
+            col1, col2 = st.columns(2)
+            col1.metric("Total Candidates Generated", len(full_df))
+            col2.metric("Selected Candidates (Filtered)", len(filtered_df))
+            
+            if not filtered_df.empty:
+                st.subheader("Top Candidates (Grouped by Gene)")
                 
-                # GC
-                mask_gc = (probes['gc_content'] >= gc_min) & (probes['gc_content'] <= gc_max)
-                # Purine
-                mask_purine = (probes['purine_content'] <= purine_max)
-                # Tm
-                mask_tm = (probes['tm_pna_giesen'] >= target_tm_min) & (probes['tm_pna_giesen'] <= target_tm_max)
-                # Validity (from hard filters like G-runs, etc.)
-                mask_valid = probes['valid']
+                # Show top 3 per gene
+                display_df = filtered_df.groupby('Gene').apply(lambda x: x.head(3)).reset_index(drop=True)
                 
-                # Combine
-                filtered_df = probes[mask_gc & mask_purine & mask_tm & mask_valid].copy()
+                st.dataframe(
+                    display_df[['Gene', 'start', 'probe_sequence', 'tm_pna_giesen', 'gc_content']]
+                    .style.format({"tm_pna_giesen": "{:.2f}"})
+                )
                 
-                # Add score (distance from ideal Tm)
-                if not filtered_df.empty:
-                    ideal_tm = (target_tm_min + target_tm_max) / 2
-                    filtered_df['tm_diff'] = abs(filtered_df['tm_pna_giesen'] - ideal_tm)
-                    filtered_df = filtered_df.sort_values('tm_diff')
-                
-                # --- Metrics ---
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Total Candidates", len(probes))
-                col2.metric("Valid (Hard Filters)", probes['valid'].sum())
-                col3.metric("Selected (User Filters)", len(filtered_df))
-                
-                # --- Results Table ---
-                st.subheader("Top Recommended Candidates")
-                
-                if not filtered_df.empty:
-                    st.dataframe(
-                        filtered_df[['start', 'length', 'probe_sequence', 'tm_pna_giesen', 'gc_content', 'purine_content']]
-                        .style.format({"tm_pna_giesen": "{:.2f}", "gc_content": "{:.1f}", "purine_content": "{:.1f}"})
-                    )
-                    
-                    # Download
-                    csv = filtered_df.to_csv(index=False)
-                    st.download_button(
-                        label="Download Best Candidates (CSV)",
-                        data=csv,
-                        file_name=f"{gene_name}_PNA_candidates.csv",
-                        mime="text/csv"
-                    )
-                    
-                    # Production Simulation
-                    st.info("ℹ️ Sending this list to Production would trigger the automated synthesis order email.")
-                    
-                else:
-                    st.warning("No candidates met the *strict* user criteria. Showing top 'Valid' candidates ignoring Tm mismatch:")
-                    # Fallback show just valid
-                    fallback = probes[probes['valid'] == True].head(10)
-                    if not fallback.empty:
-                        st.dataframe(fallback)
-                    else:
-                        st.error("No candidates passed the hard structural/composition filters (G-runs, etc.). Try relaxing the constraints.")
-                        
-                # --- All Data ---
-                with st.expander("See Raw Data (All Tiles)"):
-                    st.dataframe(probes)
+                # Download Full Batch
+                csv = filtered_df.to_csv(index=False)
+                st.download_button(
+                    label="Download All Selected Candidates (CSV)",
+                    data=csv,
+                    file_name="batch_pna_results.csv",
+                    mime="text/csv"
+                )
             else:
-                st.error("No probes generated.")
+                st.warning("No candidates met the filtered criteria.")
+                
+        else:
+            st.error("No valid probes generated for any target.")

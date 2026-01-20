@@ -28,56 +28,93 @@ def main():
     
     args = parser.parse_args()
     
-    target_seq = ""
-    gene_name = args.gene
+    targets = [] # List of tuples: (gene_name, sequence)
     
+    # 1. Input Source Processing
     if args.file:
         if os.path.exists(args.file):
-            record = next(SeqIO.parse(args.file, "fasta"))
-            target_seq = str(record.seq)
-            gene_name = record.id
+            print(f"Reading batch from {args.file}...")
+            for record in SeqIO.parse(args.file, "fasta"):
+                targets.append((record.id, str(record.seq)))
         else:
             print(f"Error: File {args.file} not found.")
             sys.exit(1)
+            
     elif args.sequence:
-        target_seq = args.sequence
+        targets.append((args.gene, args.sequence))
+        
     elif args.gene:
-        # Fetch from NCBI
-        try:
-            from . import ncbi
-            target_seq, acc_id, desc = ncbi.fetch_mrna_by_symbol(args.gene)
-            print(f"Successfully downloaded {acc_id}: {desc}")
-            gene_name = args.gene # Keep the symbol as the main identifier
-        except Exception as e:
-            print(f"Error fetching gene '{args.gene}': {e}")
-            sys.exit(1)
+        # Handle comma-separated list
+        gene_list = [g.strip() for g in args.gene.split(',')]
+        from . import ncbi
+        
+        for g_sym in gene_list:
+            try:
+                print(f"Fetching {g_sym}...")
+                seq, acc_id, desc = ncbi.fetch_mrna_by_symbol(g_sym)
+                # Use Symbol as ID, but maybe store accession in description? 
+                # For simplicity, we use Symbol as gene_name
+                targets.append((g_sym, seq))
+                print(f" - Found {acc_id}")
+            except Exception as e:
+                print(f" - Error fetching {g_sym}: {e}")
+                
     else:
-        print("Please provide a sequence using --sequence, --file, or a gene symbol using --gene")
+        print("Please provide input via --file, --sequence, or --gene")
         sys.exit(1)
         
-    print(f"Designing PNA probes for: {gene_name}")
-    print(f"Sequence Length: {len(target_seq)} bp")
-    
-    # Run Designer
-    pna_designer = designer.PNADesigner(target_seq, gene_name)
-    all_candidates = pna_designer.design_probes()
-    
-    # Save all results (including failed ones for debugging)
-    all_candidates.to_csv(args.output, index=False)
-    print(f"\nFull analysis saved to {args.output}")
-    
-    # Get Best Candidates
-    best = pna_designer.get_best_candidates(top_n=3)
-    
-    if not best.empty:
-        print("\nTop Recommended Probes:")
-        print(best[['probe_sequence', 'length', 'tm_pna_giesen', 'gc_content', 'purine_content']].to_string())
+    if not targets:
+        print("No valid targets found.")
+        sys.exit(1)
         
-        # Trigger Automation
-        notify_production(best, gene_name)
-        notify_finance(best, gene_name)
+    print(f"\nProcessing {len(targets)} target(s)...")
+    
+    all_results = []
+    
+    # 2. Batch Processing
+    for gene_name, seq in targets:
+        print(f"Designing for {gene_name} ({len(seq)} bp)...")
+        # Initialize Designer
+        pna_ds = designer.PNADesigner(seq, gene_name)
+        # Run (using defaults in CLI)
+        candidates = pna_ds.design_probes()
+        
+        # Add Gene Name column to distinguish in batch file
+        candidates['Gene'] = gene_name
+        
+        all_results.append(candidates)
+        
+    if all_results:
+        final_df = pd.concat(all_results, ignore_index=True)
+        
+        # Save
+        final_df.to_csv(args.output, index=False)
+        print(f"\nBatch analysis saved to {args.output}")
+        
+        # Filter Best for Notifications
+        # We need to filter 'valid' ones from the big dataframe
+        valid_only = final_df[final_df['valid'] == True]
+        
+        if not valid_only.empty:
+            # We can pick top 3 per gene
+            best_list = []
+            for g, group in valid_only.groupby('Gene'):
+                 # Sort by simple Tm distance from center (approx)
+                 target_median = (config.TARGET_TM_MIN + config.TARGET_TM_MAX) / 2
+                 group['tm_diff'] = abs(group['tm_pna_giesen'] - target_median)
+                 best_list.append(group.sort_values('tm_diff').head(3))
+            
+            best_df = pd.concat(best_list)
+            
+            print("\nTop Candidates Per Gene:")
+            print(best_df[['Gene', 'probe_sequence', 'tm_pna_giesen', 'gc_content']].to_string(index=False))
+            
+            notify_production(best_df, "Batch_Order")
+            notify_finance(best_df, "Batch_Order")
+        else:
+             print("\nNo candidates passed strict filtering for any gene.")
     else:
-        print("\nNo probes met the strict design criteria. Check the output CSV for failure reasons.")
+        print("No results generated.")
 
 if __name__ == "__main__":
     main()

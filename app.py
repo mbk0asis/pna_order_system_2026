@@ -41,34 +41,74 @@ with st.sidebar.expander("Thermodynamics", expanded=True):
 # BUT I will apply the user selected filters on the DATAFRAME output.
 # This allows 'soft' filtering on top of 'hard' configuration.
 
+# --- Helper Functions ---
+@st.cache_data
+def get_cached_sequence(gene_symbol):
+    """Wrapper to fetch sequence: Check DB first, then NCBI."""
+    from src import database
+    
+    # 1. Check DB
+    row = database.get_gene(gene_symbol)
+    if row:
+        return row[0], row[1], row[2] # seq, acc, desc
+    
+    # 2. Fetch NCBI
+    seq, acc, desc = ncbi.fetch_mrna_by_symbol(gene_symbol)
+    
+    # 3. Save to DB
+    database.save_gene(gene_symbol, acc, desc, seq)
+    return seq, acc, desc
+
+def save_results_to_db(gene_name, probes_df):
+    """Saves the probe results to the database."""
+    from src import database
+    database.save_probes(gene_name, probes_df)
+
 # --- Main Input ---
-input_method = st.radio("Input Method", ["Gene Symbol (NCBI)", "Raw Sequence", "FASTA File"])
+input_method = st.radio("Input Method", ["Gene Symbol (NCBI/DB)", "Raw Sequence", "FASTA File", "View History"])
 
 targets = [] # List of tuples (gene_name, sequence)
 
-if input_method == "Gene Symbol (NCBI)":
+if input_method == "Gene Symbol (NCBI/DB)":
     gene_input = st.text_input("Enter Gene Symbol(s) (comma separated)", value="")
+    
     if gene_input:
-        if st.button("Fetch Sequences"):
-            gene_list = [g.strip() for g in gene_input.split(',') if g.strip()]
-            
-            with st.spinner(f"Fetching {len(gene_list)} genes from NCBI..."):
-                fetched_targets = []
+        gene_list = [g.strip() for g in gene_input.split(',') if g.strip()]
+        
+        if gene_list:
+            fetched_targets = []
+            with st.spinner(f"Processing {len(gene_list)} genes..."):
                 for sym in gene_list:
                     try:
-                        seq, acc_id, desc = ncbi.fetch_mrna_by_symbol(sym)
+                        seq, acc_id, desc = get_cached_sequence(sym)
                         fetched_targets.append((sym, seq))
-                        st.success(f"Downloaded {sym} ({acc_id})")
                     except Exception as e:
                         st.error(f"Error fetching {sym}: {e}")
-                
-                if fetched_targets:
-                    st.session_state['targets'] = fetched_targets
+            
+            if fetched_targets:
+                st.session_state['targets'] = fetched_targets
+                st.toast(f"Loaded {len(fetched_targets)} genes (checked DB/NCBI)", icon="✅")
 
-    # Persist
-    if 'targets' in st.session_state and input_method == "Gene Symbol (NCBI)":
-        targets = st.session_state['targets']
-        st.info(f"Loaded {len(targets)} targets: {', '.join([t[0] for t in targets])}")
+elif input_method == "View History":
+    from src import database
+    st.subheader("Saved Genes")
+    genes = database.get_all_genes()
+    if genes:
+        df_genes = pd.DataFrame(genes, columns=["Symbol", "Accession", "Last Updated"])
+        st.dataframe(df_genes)
+        
+        selected_gene = st.selectbox("Select a gene to load", df_genes['Symbol'])
+        if st.button("Load Selected Gene"):
+            seq, acc, desc = get_cached_sequence(selected_gene)
+            st.session_state['targets'] = [(selected_gene, seq)]
+            st.success(f"Loaded {selected_gene}")
+            # Switch back to run analysis? No, just load it into state.
+            # User might need to switch tab to run, or we render run button here.
+            input_method = "Gene Symbol (NCBI/DB)" # Hack to show analysis UI below
+            targets = [(selected_gene, seq)]
+            
+    else:
+        st.info("No history found in database.")
 
 elif input_method == "Raw Sequence":
     target_sequence = st.text_area("Paste DNA/mRNA Sequence (5'->3')", height=150)
@@ -80,20 +120,24 @@ elif input_method == "FASTA File":
     uploaded_file = st.file_uploader("Upload FASTA (Single or Multi-record)", type=["fasta", "fa"])
     if uploaded_file is not None:
         stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
-        # Parse all records
         for record in SeqIO.parse(stringio, "fasta"):
             targets.append((record.id, str(record.seq)))
         st.info(f"Loaded {len(targets)} sequences from file.")
 
+# Restore targets from session if valid
+if 'targets' in st.session_state and not targets:
+    if input_method != "View History": # Don't overwrite if viewing history
+        targets = st.session_state['targets']
+        if targets:
+            st.info(f"Using loaded targets: {', '.join([t[0] for t in targets])}")
+
 # --- Analysis ---
 if targets:
-    if st.button("Run PNA Design", type="primary"):
+    if st.button("Run PNA Design & Save", type="primary"):
         all_probes_list = []
-        
         progress_bar = st.progress(0)
         
         for idx, (g_name, t_seq) in enumerate(targets):
-            # Update Progress
             progress_bar.progress((idx + 1) / len(targets))
             
             # Run Design
@@ -107,10 +151,21 @@ if targets:
             if not probes.empty:
                 probes['Gene'] = g_name
                 all_probes_list.append(probes)
+                
+                # SAVE TO DB
+                # Ensure the gene exists in DB first (important for Foreign Key if strict, 
+                # strictly we should save gene for FASTA/Raw too if we want relational integrity)
+                # For now, we save gene if it's not "CustomSeq" or maybe just save all?
+                # Let's save all to genes table to ensure FK works
+                from src import database
+                database.save_gene(g_name, "Custom/Upload", "Automated Import", t_seq)
+                save_results_to_db(g_name, probes)
         
         progress_bar.empty()
         
         if all_probes_list:
+            st.toast("Results saved to Database!", icon="💾")
+            
             full_df = pd.concat(all_probes_list, ignore_index=True)
             
             # --- Apply Dynamic User Filters ---

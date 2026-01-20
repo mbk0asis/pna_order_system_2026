@@ -35,15 +35,15 @@ The engine processes the target sequence through multiple filtration layers:
 
 ```mermaid
 graph TD
-    A[User Input: GENE] --> B[Fetch mRNA from NCBI]
-    B --> C[Tile Sequence 12-18bp]
-    C --> D{Filtering Engine}
-    D -->|Fail| E[Discard]
-    D -->|Pass| F[Check Structure/Composition]
-    F -->|Pass| G[Calculate Tm (Giesen)]
-    G --> H[User Confirmation]
-    H --> I[Save to Production DB]
-    I --> J[Notify Production & Finance]
+    A["User Input: GENE"] --> B["Fetch mRNA from NCBI"]
+    B --> C["Tile Sequence 12-18bp"]
+    C --> D{"Filtering Engine"}
+    D -->|Fail| E["Discard"]
+    D -->|Pass| F["Check Structure/Composition"]
+    F -->|Pass| G["Calculate Tm (Giesen)"]
+    G --> H["User Confirmation"]
+    H --> I["Save to Production DB"]
+    I --> J["Notify Production & Finance"]
 ```
 
 ---

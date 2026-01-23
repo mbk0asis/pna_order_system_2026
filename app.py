@@ -3,6 +3,8 @@ import pandas as pd
 from src import designer, ncbi, config, thermo
 from Bio import SeqIO
 from io import StringIO
+import os
+from kmer_db import kmer_tool
 
 st.set_page_config(page_title="PNA Oligo Designer", layout="wide")
 
@@ -29,6 +31,11 @@ with st.sidebar.expander("Sequence Constraints", expanded=True):
 with st.sidebar.expander("Thermodynamics", expanded=True):
     target_tm_min = st.number_input("Min Tm (°C)", value=config.TARGET_TM_MIN)
     target_tm_max = st.number_input("Max Tm (°C)", value=config.TARGET_TM_MAX)
+    
+with st.sidebar.expander("Off-Target Analysis", expanded=False):
+    use_kmer_db = st.checkbox("Check Off-Targets with K-mer DB")
+    kmer_db_path = st.text_input("Database Path", value="kmer_db/test_kmers.db")
+    max_kmer_filter = st.number_input("Max K-mer Frequency Filter", value=1000, help="Filter out probes with k-mer counts higher than this.")
     
 # Update Config values temporarily for this session (Hack: ideally pass params to designer)
 # Since designer uses config global, we can try to override it or refactor designer.
@@ -149,6 +156,23 @@ if targets:
             )
             
             if not probes.empty:
+                # --- Off-Target Analysis ---
+                if use_kmer_db:
+                    if os.path.exists(kmer_db_path):
+                        # Calculate metrics
+                         with st.spinner(f"Checking off-targets for {g_name}..."):
+                            probes['kmer_metrics'] = probes['probe_sequence'].apply(
+                                lambda x: kmer_tool.get_probe_metrics(kmer_db_path, x)
+                            )
+                            probes['max_kmer_count'] = probes['kmer_metrics'].apply(lambda x: x['max_kmer_count'] if x else 0)
+                            # Remove the complex dict column to keep DF clean for display/storage implies we might want to keep it?
+                            # For CSV save we might want it, but for DB it might be complex.
+                            # Let's drop metrics object and keep scalar
+                            probes.drop(columns=['kmer_metrics'], inplace=True)
+                    else:
+                        st.warning(f"K-mer DB not found at {kmer_db_path}. Skipping analysis.")
+                        probes['max_kmer_count'] = 0 # Default
+
                 probes['Gene'] = g_name
                 all_probes_list.append(probes)
                 
@@ -174,7 +198,13 @@ if targets:
             mask_tm = (full_df['tm_pna_giesen'] >= target_tm_min) & (full_df['tm_pna_giesen'] <= target_tm_max)
             mask_valid = full_df['valid'] # Only basic structure validity
             
-            filtered_df = full_df[mask_gc & mask_purine & mask_tm & mask_valid].copy()
+            mask_off_target = pd.Series([True] * len(full_df))
+            if use_kmer_db and 'max_kmer_count' in full_df.columns:
+                 mask_off_target = (full_df['max_kmer_count'] <= max_kmer_filter)
+            
+            filtered_df = full_df[mask_gc & mask_purine & mask_tm & mask_valid & mask_off_target].copy()
+            
+
             
             # Metrics
             st.divider()
@@ -188,8 +218,12 @@ if targets:
                 # Show top 3 per gene
                 display_df = filtered_df.groupby('Gene').apply(lambda x: x.head(3)).reset_index(drop=True)
                 
+                cols_to_show = ['Gene', 'start', 'probe_sequence', 'tm_pna_giesen', 'gc_content']
+                if 'max_kmer_count' in display_df.columns:
+                    cols_to_show.append('max_kmer_count')
+
                 st.dataframe(
-                    display_df[['Gene', 'start', 'probe_sequence', 'tm_pna_giesen', 'gc_content']]
+                    display_df[cols_to_show]
                     .style.format({"tm_pna_giesen": "{:.2f}"})
                 )
                 

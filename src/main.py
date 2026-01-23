@@ -2,7 +2,9 @@ import argparse
 import sys
 import os
 from Bio import SeqIO
+import pandas as pd
 from . import designer
+from . import config
 
 # Mock function for email notification
 def notify_production(best_probes, gene):
@@ -93,7 +95,7 @@ def main():
         
         # Filter Best for Notifications
         # We need to filter 'valid' ones from the big dataframe
-        valid_only = final_df[final_df['valid'] == True]
+        valid_only = final_df[final_df['valid'] == True].copy()
         
         if not valid_only.empty:
             # We can pick top 3 per gene
@@ -101,8 +103,10 @@ def main():
             for g, group in valid_only.groupby('Gene'):
                  # Sort by simple Tm distance from center (approx)
                  target_median = (config.TARGET_TM_MIN + config.TARGET_TM_MAX) / 2
-                 group['tm_diff'] = abs(group['tm_pna_giesen'] - target_median)
-                 best_list.append(group.sort_values('tm_diff').head(3))
+                 # Use a copy to avoid SettingWithCopyWarning
+                 group_copy = group.copy()
+                 group_copy['tm_diff'] = abs(group_copy['tm_pna_giesen'] - target_median)
+                 best_list.append(group_copy.sort_values('tm_diff').head(3))
             
             best_df = pd.concat(best_list)
             

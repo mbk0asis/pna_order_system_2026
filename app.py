@@ -65,7 +65,10 @@ def save_results_to_db(gene_name, probes_df):
     database.save_probes(gene_name, probes_df)
 
 # --- Main Input ---
-input_method = st.radio("Input Method", ["Gene Symbol (NCBI/DB)", "Raw Sequence", "FASTA File", "View History"])
+if 'input_method' not in st.session_state:
+    st.session_state['input_method'] = "Gene Symbol (NCBI/DB)"
+
+input_method = st.radio("Input Method", ["Gene Symbol (NCBI/DB)", "Raw Sequence", "FASTA File", "View History"], key="input_method")
 
 targets = [] # List of tuples (gene_name, sequence)
 
@@ -97,15 +100,16 @@ elif input_method == "View History":
         df_genes = pd.DataFrame(genes, columns=["Symbol", "Accession", "Last Updated"])
         st.dataframe(df_genes)
         
-        selected_gene = st.selectbox("Select a gene to load", df_genes['Symbol'])
-        if st.button("Load Selected Gene"):
-            seq, acc, desc = get_cached_sequence(selected_gene)
-            st.session_state['targets'] = [(selected_gene, seq)]
-            st.success(f"Loaded {selected_gene}")
-            # Switch back to run analysis? No, just load it into state.
-            # User might need to switch tab to run, or we render run button here.
-            input_method = "Gene Symbol (NCBI/DB)" # Hack to show analysis UI below
-            targets = [(selected_gene, seq)]
+        selected_gene = st.selectbox("Select a gene to load", df_genes['Symbol'], key="selected_gene_to_load")
+
+        def load_gene_callback():
+            gene = st.session_state["selected_gene_to_load"]
+            seq, acc, desc = get_cached_sequence(gene)
+            st.session_state['targets'] = [(gene, seq)]
+            # Switch back to run analysis
+            st.session_state['input_method'] = "Gene Symbol (NCBI/DB)"
+
+        st.button("Load Selected Gene", on_click=load_gene_callback)
             
     else:
         st.info("No history found in database.")
@@ -125,11 +129,13 @@ elif input_method == "FASTA File":
         st.info(f"Loaded {len(targets)} sequences from file.")
 
 # Restore targets from session if valid
-if 'targets' in st.session_state and not targets:
-    if input_method != "View History": # Don't overwrite if viewing history
-        targets = st.session_state['targets']
-        if targets:
-            st.info(f"Using loaded targets: {', '.join([t[0] for t in targets])}")
+if 'targets' in st.session_state and not targets and input_method == "Gene Symbol (NCBI/DB)":
+    targets = st.session_state['targets']
+    if targets:
+        st.info(f"Using loaded targets: {', '.join([t[0] for t in targets])}")
+        if st.session_state.get('load_message'):
+            st.success(st.session_state['load_message'])
+            st.session_state['load_message'] = None
 
 # --- Analysis ---
 if targets:
@@ -186,7 +192,7 @@ if targets:
                 st.subheader("Top Candidates (Grouped by Gene)")
                 
                 # Show top 3 per gene
-                display_df = filtered_df.groupby('Gene').apply(lambda x: x.head(3)).reset_index(drop=True)
+                display_df = filtered_df.groupby('Gene').head(3)
                 
                 st.dataframe(
                     display_df[['Gene', 'start', 'probe_sequence', 'tm_pna_giesen', 'gc_content']]

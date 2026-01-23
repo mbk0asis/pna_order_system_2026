@@ -115,3 +115,6 @@ def get_all_genes():
     rows = c.fetchall()
     conn.close()
     return rows
+
+# Initialize DB on module load
+init_db()

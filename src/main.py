@@ -1,8 +1,10 @@
 import argparse
 import sys
 import os
+import pandas as pd
 from Bio import SeqIO
 from . import designer
+from . import config
 
 # Mock function for email notification
 def notify_production(best_probes, gene):

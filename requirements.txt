@@ -1,4 +1,4 @@
-biopython
-pandas
-numpy
-streamlit
+biopython==1.86
+pandas==2.3.3
+numpy==2.4.1
+streamlit==1.53.1
